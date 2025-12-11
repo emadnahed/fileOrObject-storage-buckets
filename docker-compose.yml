@@ -1,0 +1,557 @@
+# Docker Compose Configuration for File Storage Service
+#
+# =============================================================================
+# WHAT IS DOCKER COMPOSE?
+# =============================================================================
+# Docker Compose is a tool for defining and running multi-container applications.
+# Instead of running each container separately with docker run commands,
+# you define all services in this YAML file and run them together with:
+#     docker-compose up
+#
+# BENEFITS:
+# - Single command to start entire application stack
+# - Automatic networking between containers
+# - Easy environment variable management
+# - Service dependencies (start database before app)
+# - Volume management for data persistence
+#
+# LEARNING RESOURCES:
+# - Docker Compose docs: https://docs.docker.com/compose/
+# - YAML syntax: https://yaml.org/
+# =============================================================================
+
+# Version of the Docker Compose file format
+# Version 3.8 is stable and widely supported
+version: '3.8'
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+# Networks allow containers to communicate with each other.
+# All services in the same network can reach each other by service name.
+#
+# Example: auth-service can connect to mongodb using "mongodb" as hostname
+networks:
+  # Custom bridge network for all our services
+  file-storage-net:
+    driver: bridge  # Bridge is the standard network type
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# Volumes persist data even when containers are stopped/removed.
+# Without volumes, data is lost when container is deleted.
+#
+# WHY USE VOLUMES?
+# - Database data persists across container restarts
+# - Configuration files persist
+# - Logs persist for analysis
+#
+# Docker manages these volumes - they're stored in /var/lib/docker/volumes/
+volumes:
+  mongodb-data:      # MongoDB database files
+  rabbitmq-data:     # RabbitMQ message queue data
+  minio-data:        # MinIO file storage
+  redis-data:        # Redis cache data
+  prometheus-data:   # Prometheus metrics data
+  grafana-data:      # Grafana dashboards and config
+
+# =============================================================================
+# SERVICES
+# =============================================================================
+# Each service is a container that runs a specific application.
+# Services can depend on each other and communicate via the network.
+services:
+
+  # ---------------------------------------------------------------------------
+  # MONGODB - NoSQL Database
+  # ---------------------------------------------------------------------------
+  # MongoDB stores our metadata: users, files, folders, versions
+  #
+  # WHY MONGODB?
+  # - Flexible schema (easy to evolve data models)
+  # - Good performance for document storage
+  # - Rich query capabilities
+  # - Native ObjectID support
+  mongodb:
+    # Image from Docker Hub (official MongoDB image)
+    # Tag "7.0" specifies the version
+    image: mongo:7.0
+
+    # Container name (easier to reference than auto-generated names)
+    container_name: file-storage-mongodb
+
+    # Restart policy: always restart unless manually stopped
+    # Options: no, always, on-failure, unless-stopped
+    restart: unless-stopped
+
+    # Environment variables passed to the container
+    # These configure MongoDB's initial setup
+    environment:
+      # Root user credentials
+      # IMPORTANT: Change these in production!
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-changeme}
+      # ${VAR:-default} means: use $VAR if set, otherwise use "default"
+
+    # Volumes: Persist data and provide initialization scripts
+    volumes:
+      # Persist database data
+      # mongodb-data volume maps to /data/db inside the container
+      - mongodb-data:/data/db
+
+      # Initialization script
+      # :ro means read-only (container can't modify the file)
+      - ./scripts/init-mongo.js:/docker-entrypoint-initdb.d/init.js:ro
+
+    # Network this container connects to
+    networks:
+      - file-storage-net
+
+    # Port mapping: host_port:container_port
+    # Access MongoDB at localhost:27017 from your machine
+    ports:
+      - "27017:27017"
+
+    # Health check: Docker periodically checks if container is healthy
+    healthcheck:
+      # Command to test if MongoDB is responding
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s    # Check every 10 seconds
+      timeout: 5s      # Wait max 5 seconds for response
+      retries: 5       # Try 5 times before marking unhealthy
+
+  # ---------------------------------------------------------------------------
+  # RABBITMQ - Message Broker
+  # ---------------------------------------------------------------------------
+  # RabbitMQ handles asynchronous communication between services.
+  # When a file is uploaded, file-service publishes an event,
+  # and processing-service consumes it to generate thumbnails.
+  #
+  # WHY RABBITMQ?
+  # - Reliable message delivery
+  # - Multiple exchange types (direct, topic, fanout)
+  # - Dead letter queues for failed messages
+  # - Management UI for monitoring
+  rabbitmq:
+    # Alpine variant is smaller (saves disk space and download time)
+    # "management" tag includes the web UI
+    image: rabbitmq:3.12-management-alpine
+
+    container_name: file-storage-rabbitmq
+    restart: unless-stopped
+
+    environment:
+      # Default user credentials
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+
+    volumes:
+      # Persist queues and messages
+      - rabbitmq-data:/var/lib/rabbitmq
+
+      # Optional: Custom configuration file
+      # Uncomment if you create configs/rabbitmq/rabbitmq.conf
+      # - ./configs/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+
+    networks:
+      - file-storage-net
+
+    ports:
+      # AMQP protocol port (application connections)
+      - "5672:5672"
+      # Management UI (access at http://localhost:15672)
+      # Default login: guest/guest
+      - "15672:15672"
+
+    healthcheck:
+      # Check if RabbitMQ is ready
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # MINIO - S3-Compatible Object Storage
+  # ---------------------------------------------------------------------------
+  # MinIO is an open-source object storage server compatible with AWS S3 API.
+  # Perfect for local development - no AWS account needed!
+  # In production, switch to real AWS S3.
+  #
+  # WHY MINIO FOR DEVELOPMENT?
+  # - Free and runs locally
+  # - 100% S3 API compatible (same code works with AWS S3)
+  # - Fast and lightweight
+  # - Web UI for browsing files
+  minio:
+    image: minio/minio:latest
+
+    container_name: file-storage-minio
+    restart: unless-stopped
+
+    # Command to start MinIO server
+    # "server /data" = serve files from /data directory
+    # "--console-address :9001" = web UI on port 9001
+    command: server /data --console-address ":9001"
+
+    environment:
+      # Access credentials (like AWS access key and secret key)
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+
+    volumes:
+      # Persist uploaded files
+      - minio-data:/data
+
+    networks:
+      - file-storage-net
+
+    ports:
+      # API port (S3-compatible API)
+      - "9000:9000"
+      # Web console (access at http://localhost:9001)
+      - "9001:9001"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # REDIS - In-Memory Data Store
+  # ---------------------------------------------------------------------------
+  # Redis is used for:
+  # - Rate limiting (token bucket algorithm)
+  # - Session storage
+  # - Caching frequently accessed data
+  #
+  # WHY REDIS?
+  # - Extremely fast (data in RAM)
+  # - Simple key-value store
+  # - Built-in data structures (lists, sets, sorted sets)
+  # - Pub/sub support
+  redis:
+    # Alpine variant is small and efficient
+    image: redis:7-alpine
+
+    container_name: file-storage-redis
+    restart: unless-stopped
+
+    # Redis server configuration via command line
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-changeme}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    # --requirepass: Set password for authentication
+    # --maxmemory: Limit memory usage to 256MB
+    # --maxmemory-policy allkeys-lru: When memory full, evict least recently used keys
+
+    volumes:
+      # Persist Redis data (optional for cache, but useful for rate limiting)
+      - redis-data:/data
+
+    networks:
+      - file-storage-net
+
+    ports:
+      - "6379:6379"
+
+    healthcheck:
+      # Redis health check (increment ping counter)
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS - Metrics Collection
+  # ---------------------------------------------------------------------------
+  # Prometheus scrapes metrics from our services and stores them.
+  # Metrics help us understand system performance:
+  # - Requests per second
+  # - Response times
+  # - Error rates
+  # - Resource usage
+  #
+  # WHY PROMETHEUS?
+  # - Industry standard for metrics
+  # - Pull-based model (services expose /metrics endpoint)
+  # - Powerful query language (PromQL)
+  # - Integrates with Grafana
+  prometheus:
+    image: prom/prometheus:latest
+
+    container_name: file-storage-prometheus
+    restart: unless-stopped
+
+    # Command-line arguments for Prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+    volumes:
+      # Configuration file
+      # This file lists which services to scrape for metrics
+      # - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+      # Persist metrics data
+      - prometheus-data:/prometheus
+
+    networks:
+      - file-storage-net
+
+    ports:
+      # Prometheus web UI (access at http://localhost:9090)
+      - "9090:9090"
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA - Metrics Visualization
+  # ---------------------------------------------------------------------------
+  # Grafana creates beautiful dashboards from Prometheus metrics.
+  # Pre-built dashboards show:
+  # - API request rates
+  # - Response time percentiles
+  # - Error rates
+  # - System resource usage
+  #
+  # WHY GRAFANA?
+  # - Beautiful, customizable dashboards
+  # - Alerting support
+  # - Multiple data source support
+  # - Template variables for dynamic dashboards
+  grafana:
+    image: grafana/grafana:latest
+
+    container_name: file-storage-grafana
+    restart: unless-stopped
+
+    environment:
+      # Admin credentials for web UI
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+
+    volumes:
+      # Persist Grafana data (dashboards, users, etc.)
+      - grafana-data:/var/lib/grafana
+
+      # Pre-configured data sources and dashboards
+      # - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+      # - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    networks:
+      - file-storage-net
+
+    ports:
+      # Grafana web UI (access at http://localhost:3000)
+      - "3000:3000"
+
+    # Grafana needs Prometheus to be running
+    depends_on:
+      - prometheus
+
+  # ---------------------------------------------------------------------------
+  # JAEGER - Distributed Tracing
+  # ---------------------------------------------------------------------------
+  # Jaeger collects and visualizes traces across microservices.
+  # A trace shows the journey of a request through multiple services:
+  #   Client -> API Gateway -> Auth Service -> MongoDB
+  #
+  # WHY JAEGER?
+  # - See request flow across services
+  # - Identify slow services/operations
+  # - Debug complex distributed issues
+  # - Performance optimization
+  jaeger:
+    # all-in-one includes collector, query, and UI
+    image: jaegertracing/all-in-one:latest
+
+    container_name: file-storage-jaeger
+    restart: unless-stopped
+
+    environment:
+      # Enable OTLP (OpenTelemetry Protocol) collector
+      COLLECTOR_OTLP_ENABLED: true
+
+    networks:
+      - file-storage-net
+
+    ports:
+      # Jaeger UI (access at http://localhost:16686)
+      - "16686:16686"
+
+      # OTLP gRPC receiver (for sending traces)
+      - "4317:4317"
+
+      # OTLP HTTP receiver (for sending traces)
+      - "4318:4318"
+
+      # UDP ports for legacy Jaeger clients
+      - "6831:6831/udp"
+
+  # ===========================================================================
+  # APPLICATION SERVICES
+  # ===========================================================================
+  # These will be added as we build them. Examples below:
+
+  # api-gateway:
+  #   build:
+  #     context: .
+  #     dockerfile: services/api-gateway/Dockerfile
+  #   container_name: file-storage-api-gateway
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     SERVICE_NAME: api-gateway
+  #     HTTP_PORT: 8080
+  #   networks:
+  #     - file-storage-net
+  #   ports:
+  #     - "8080:8080"
+  #   depends_on:
+  #     - mongodb
+  #     - redis
+  #     - rabbitmq
+  #   healthcheck:
+  #     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+
+# =============================================================================
+# USAGE INSTRUCTIONS
+# =============================================================================
+#
+# START ALL SERVICES:
+#     docker-compose up
+#     # Add -d flag to run in background (detached mode)
+#     docker-compose up -d
+#
+# STOP ALL SERVICES:
+#     docker-compose down
+#
+# VIEW LOGS:
+#     docker-compose logs
+#     # Follow logs in real-time:
+#     docker-compose logs -f
+#     # Logs for specific service:
+#     docker-compose logs -f mongodb
+#
+# RESTART A SERVICE:
+#     docker-compose restart mongodb
+#
+# REBUILD SERVICES (after code changes):
+#     docker-compose up --build
+#
+# REMOVE EVERYTHING (including volumes):
+#     docker-compose down -v
+#     # WARNING: This deletes all data!
+#
+# CHECK SERVICE STATUS:
+#     docker-compose ps
+#
+# =============================================================================
+# ACCESSING SERVICES
+# =============================================================================
+#
+# MongoDB:
+#     Connection string: mongodb://admin:changeme@localhost:27017
+#     Use MongoDB Compass or mongosh to connect
+#
+# RabbitMQ Management UI:
+#     URL: http://localhost:15672
+#     Login: guest / guest
+#
+# MinIO Console:
+#     URL: http://localhost:9001
+#     Login: minioadmin / minioadmin
+#
+# Redis:
+#     Host: localhost:6379
+#     Password: changeme
+#     Use redis-cli: redis-cli -h localhost -p 6379 -a changeme
+#
+# Prometheus:
+#     URL: http://localhost:9090
+#
+# Grafana:
+#     URL: http://localhost:3000
+#     Login: admin / admin
+#
+# Jaeger UI:
+#     URL: http://localhost:16686
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+#
+# SERVICE WON'T START:
+#     1. Check logs: docker-compose logs service-name
+#     2. Check if port is already in use: lsof -i :port_number
+#     3. Try recreating: docker-compose up --force-recreate service-name
+#
+# SLOW PERFORMANCE:
+#     1. Check Docker Desktop resources (CPU, Memory)
+#     2. Increase resource limits in Docker Desktop settings
+#     3. Use docker stats to see resource usage
+#
+# DATABASE DATA LOST:
+#     - Don't use docker-compose down -v in production!
+#     - Volumes persist data - only removed with -v flag
+#     - Back up volumes regularly
+#
+# NETWORKING ISSUES:
+#     - Services use DNS names (service name = hostname)
+#     - Example: auth-service connects to mongodb using "mongodb:27017"
+#     - Check network: docker network inspect go_backend_file-storage-net
+#
+# =============================================================================
+# PRODUCTION CONSIDERATIONS
+# =============================================================================
+#
+# This docker-compose.yml is designed for DEVELOPMENT.
+# For PRODUCTION, you need:
+#
+# 1. SECRETS MANAGEMENT:
+#    - Don't use default passwords!
+#    - Use Docker secrets or environment-specific .env files
+#    - Rotate credentials regularly
+#
+# 2. RESOURCE LIMITS:
+#    - Add memory and CPU limits to prevent resource exhaustion
+#    - Example:
+#      resources:
+#        limits:
+#          cpus: '2.0'
+#          memory: 2G
+#
+# 3. LOGGING:
+#    - Configure centralized logging (ELK stack, CloudWatch)
+#    - Set up log rotation
+#
+# 4. BACKUPS:
+#    - Regular database backups
+#    - Volume snapshots
+#    - S3 cross-region replication
+#
+# 5. MONITORING:
+#    - Set up alerts (PagerDuty, Slack)
+#    - Monitor disk space
+#    - Track service health
+#
+# 6. SCALING:
+#    - Use orchestration platforms (Kubernetes, Docker Swarm)
+#    - Implement load balancing
+#    - Auto-scaling policies
+#
+# 7. SECURITY:
+#    - Use TLS/SSL for all connections
+#    - Network segmentation
+#    - Regular security updates
+#    - Firewall rules
+#
+# =============================================================================

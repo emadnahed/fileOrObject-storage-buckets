@@ -1,0 +1,98 @@
+# Binaries for programs and plugins
+# These are the compiled executable files that Go creates
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary, built with `go test -c`
+# When you run tests with the -c flag, Go creates a test binary
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+# Coverage files help you see which parts of your code are tested
+*.out
+coverage.out
+*.coverprofile
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+# go.work is used for multi-module workspaces
+go.work
+
+# Environment files
+# These contain sensitive information like API keys and passwords
+# NEVER commit these to version control!
+.env
+.env.local
+.env.*.local
+.env.dev
+.env.staging
+.env.prod
+
+# IDE and Editor files
+# These are configuration files specific to your code editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+# Application logs shouldn't be committed
+*.log
+logs/
+
+# Docker volumes and data
+# These directories store persistent data from Docker containers
+data/
+volumes/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build output
+# Compiled binaries and build artifacts
+build/
+out/
+
+# Database files (for local development)
+# Local database files shouldn't be committed
+*.db
+*.sqlite
+*.sqlite3
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Cloud provider credentials
+# AWS, GCP, Azure credentials should never be committed
+.aws/
+.gcp/
+.azure/
+
+# Certificates and keys
+# Private keys and certificates are sensitive
+*.pem
+*.key
+*.crt
+*.cer
+
+# Grafana and Prometheus data
+# These are generated at runtime
+configs/grafana/data/
+configs/prometheus/data/
